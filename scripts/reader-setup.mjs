@@ -45,6 +45,7 @@ export const readerSetupMessages = {
   READER_DATABASE_MISSING: '账号目录已找到，但消息或联系人数据库尚未同步完成。请在微信打开几个聊天，等待同步后重试。',
   READER_KEY_INVALID: '读取密钥与所选账号不匹配。请点击“一键连接并验证”重新获取，或在高级选项中填写该账号的有效密钥。',
   READER_KEY_REQUIRED: '尚未获取读取密钥。请点击“一键连接并验证”，然后在微信中完成登录。',
+  READER_LOGIN_RESTART_REQUIRED: '微信已经登录，但当前账号还没有可复用的有效读取凭据。请点击“重开微信并连接”，程序会先准备连接，再提示你登录。',
   READER_SECRET_UNAVAILABLE: '旧凭据无法在当前 Windows 用户下读取。请点击“一键连接并验证”重新获取。',
   READER_DATABASE_UNREADABLE: '密钥验证通过，但数据库暂时无法完整读取。请等待微信同步完成后重试；若仍失败，请使用“验证内置环境”检查安装文件。',
   READER_DEPENDENCY_MISSING: '读取组件不完整或无法加载。请重新安装更新后的安装包，再使用“验证内置环境”检查。',
@@ -69,7 +70,7 @@ export const readerSetupMessages = {
   HOOK_VERSION_MISMATCH: '微信版本与当前发送组件不匹配，原配置已保留。请使用项目匹配的微信客户端。',
   REVIEWED_HOOK_BUILD_REQUIRED: '当前端口不是已适配的微信发送组件，原配置已保留。请检查端口和匹配微信。',
   READER_KEY_ACCESS_DENIED: '无法连接微信进程。请以相同的 Windows 用户和权限打开微信与助手后重试。',
-  READER_SETUP_TIMEOUT: '获取密钥超时。请再次点击“一键连接并验证”，然后在微信中退出账号并重新登录；程序会等待登录完成。',
+  READER_SETUP_TIMEOUT: '本次未等到可验证的登录初始化。请点击“重开微信并连接”，按提示重新打开匹配微信；已有配置和聊天记录会保留。',
   READER_SETUP_FAILED: '自动连接未完成。请确认微信已打开、目录对应当前账号后重试；原有配置已保留。',
 };
 

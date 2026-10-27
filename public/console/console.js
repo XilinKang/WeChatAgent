@@ -17,6 +17,7 @@ import { createExtensionUI } from './extensions.js';
 import {createStickerManagerUI} from './sticker-manager.js';
 import {mergeConversationSave} from './conversation-settings.mjs';
 import {openProcessRecovery,needsWeChatRepair} from './process-recovery.js';
+import {mergeConfigDraft,resolveConfigConflicts,mergeReaderDraft} from './config-sync.mjs';
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const icon = name => `<svg aria-hidden="true"><use href="/icons.svg#${name}"></use></svg>`;
@@ -96,6 +97,54 @@ window.desktop?.onShutdownState?.(phase=>{
 });
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => { $('#toast').hidden = true; }, 4200); }
 function showError(message) { $('#connection-error').textContent = message; $('#connection-error').hidden = false; }
+function clearError(){ $('#connection-error').hidden=true;$('#connection-error').textContent=''; }
+function settingLabel(keys){
+  const key=keys.join('.'),labels={'wechat.whitelist.private':'允许的好友','wechat.whitelist.groups':'允许的群聊','persona.default':'默认人格','dsh.provider':'模型提供方','dsh.model':'模型','runtime.dshDesktop':'DSH 程序位置','reader.selection':'微信连接账号'};
+  return labels[key]??(key.startsWith('persona.chats')?'聊天的人格':key.startsWith('wechat.')?'聊天设置：'+({'search':'联网搜索','stickers':'表情包','context':'上下文','proactive':'主动聊天','webReader':'网页阅读','assistant':'助手设置','replyLayout':'消息分段'}[keys[1]]??'此聊天'):'连接或回复设置');
+}
+async function chooseConflicts(result){
+  if(!result.conflicts.length)return result.draft;
+  return new Promise(resolve=>{
+    let finished=false;const finish=value=>{if(!finished){finished=true;resolve(value);}};
+    const value=(data,path)=>/key|token|password|secret/i.test(path.join('.'))?'已隐藏':path.join('.')==='reader.selection'?(data?.myWxid||'未选择账号'):data===undefined?'未设置':typeof data==='boolean'?(data?'开启':'关闭'):Array.isArray(data)?data.length+' 项':typeof data==='object'?'多项设置':String(data).slice(0,100);
+    modal('部分设置同时被修改','<p class="modal-description">你的草稿已保留。以下设置也在其他窗口发生变化，请逐项选择。其他改动会自动合并。</p><form id="resolve-config-conflicts">'+result.conflicts.map((item,index)=>'<fieldset class="field"><legend>'+escapeHtml(settingLabel(item.path))+'</legend><label><input type="radio" name="conflict-'+index+'" value="local" required> 保留本页：'+escapeHtml(value(item.local,item.path))+'</label><label><input type="radio" name="conflict-'+index+'" value="saved" required> 使用已保存：'+escapeHtml(value(item.saved,item.path))+'</label></fieldset>').join('')+'<div class="modal-actions"><button class="button" type="button" data-close>暂不处理</button><button class="button primary" type="submit">合并所选设置</button></div></form>',{onClose:()=>finish(null)});
+    $('#resolve-config-conflicts').onsubmit=event=>{event.preventDefault();const form=event.currentTarget;const choices=result.conflicts.map((_,index)=>form.elements['conflict-'+index].value);finish(resolveConfigConflicts(result,choices));closeModal();};
+  });
+}
+async function syncReaderSnapshot(){
+  const latest=await api('/api/reader-config'),merged=mergeReaderDraft(state.reader,state.readerDraft,latest);
+  if(merged.conflict){
+    const result={draft:{reader:{selection:{dbPath:merged.draft.dbPath,myWxid:merged.draft.myWxid}}},conflicts:[{path:['reader','selection'],local:{dbPath:merged.draft.dbPath,myWxid:merged.draft.myWxid},saved:{dbPath:latest.dbPath,myWxid:latest.myWxid}}]};
+    const chosen=await chooseConflicts(result);if(!chosen)return false;
+    if(JSON.stringify(chosen.reader.selection)===JSON.stringify(result.conflicts[0].saved))merged.draft={...chosen.reader.selection,decryptKey:''};
+  }
+  state.reader=latest;state.readerDraft=merged.draft;
+  if(latest.verified&&!readerDirty()){state.readerError='';state.readerNeedsRestart=false;}
+  return true;
+}
+async function syncProjectSnapshot(latest){
+  if(state.accountScope&&latest.accountScope&&state.accountScope!==latest.accountScope&&configDirty())throw Error('微信账号已切换。当前草稿已保留，请切回原账号后保存，避免把旧账号的聊天设置用于新账号。');
+  const result=mergeConfigDraft(state.config,state.draft,latest.config),draft=await chooseConflicts(result);
+  if(!draft)return false;
+  state.config=latest.config;state.draft=draft;state.revision=latest.revision;state.accountScope=latest.accountScope;
+  return true;
+}
+async function saveProjectDraft(){
+  for(let attempt=0;attempt<3;attempt++){
+    if(!configDirty())return true;
+    const submitted=structuredClone(state.draft);
+    try{
+      const result=await api('/api/config',{config:submitted,revision:state.revision});
+      state.draft=mergeConfigDraft(submitted,state.draft,result.config).draft;
+      state.config=result.config;state.revision=result.revision;state.accountScope=result.accountScope;
+      return true;
+    }catch(error){
+      if(error.status!==409)throw error;
+      if(!await syncProjectSnapshot(await api('/api/config')))return false;
+    }
+  }
+  throw Error('设置仍在被其他窗口修改，草稿已保留，请稍后再保存。');
+}
 function updateDraftUI() {
   $('#save-bar').hidden = !hasDraft(); document.body.classList.toggle('has-draft', hasDraft());
   $('#nav-chat-count').textContent = state.draft ? state.draft.wechat.whitelist.private.length + state.draft.wechat.whitelist.groups.length : '—';
@@ -358,15 +407,16 @@ function readerConfigurationCard() {
     <div class="form-grid"><div class="field full"><label for="reader-path">微信账号目录</label><div class="input-with-button"><input id="reader-path" data-reader="dbPath" value="${escapeHtml(draft.dbPath)}" placeholder="可选择 xwechat_files、账号文件夹或 db_storage"><button class="button" data-browse="folder" data-target="reader-path">${icon('folder')}选择文件夹</button></div><small>不知道目录在哪时，先点击“自动查找账号”。选择文件夹后会自动识别账号。</small></div>
     <div class="field full"><label for="reader-account">当前账号</label><select id="reader-account" data-reader="myWxid"><option value="">${accounts.length > 1 ? '找到多个账号，请选择当前登录的账号' : '等待识别账号目录'}</option>${accounts.length ? accounts.map(a => `<option value="${escapeHtml(a.dbPath)}" ${draft.dbPath === a.dbPath ? 'selected' : ''}>${escapeHtml(a.myWxid)}${a.ready ? '' : '（等待微信同步）'}</option>`).join('') : draft.myWxid ? `<option value="${escapeHtml(draft.myWxid)}" selected>${escapeHtml(draft.myWxid)}</option>` : ''}</select></div></div>
     <div class="button-row space-top"><button class="button" id="detect-reader">${icon('search')}自动查找账号</button><button class="button" id="scan-reader">识别此目录</button><button class="button primary" data-action="reader-connect">${icon('plug')}一键连接并验证</button></div>
-    <p class="reader-progress" id="reader-progress" role="status" aria-live="polite"></p><p id="reader-save-error" class="inline-error" role="alert">${escapeHtml(state.readerError)}</p>
+    <p class="reader-progress" id="reader-progress" role="status" aria-live="polite"></p><p id="reader-save-error" class="inline-error" role="alert">${escapeHtml(state.readerError)}</p><button class="button primary" id="restart-reader-connect" ${state.readerNeedsRestart?'':'hidden'}>重开微信并连接</button>
     <details class="advanced"><summary>高级选项：手动填写读取密钥</summary><div class="form-grid"><div class="field full"><label for="reader-key">数据库密钥</label><input id="reader-key" data-reader="decryptKey" value="${escapeHtml(draft.decryptKey)}" type="password" autocomplete="new-password" placeholder="${r?.hasKey ? '已有凭据；留空先验证原值' : '通常无需填写，一键连接会自动获取'}"><small>密钥会在当前电脑安全保存。只在你已经取得有效密钥时填写。</small></div></div><div class="button-row space-top"><button class="button" id="save-reader">验证并保存手动设置</button><button class="button" data-action="reader-check">检查已保存的读取设置</button></div></details>
-    <p class="subtle space-top">获取时请在微信中完成登录；若一直等待，可在微信退出账号后重新登录。验证通过后，继续连接 DSH 并启动服务。</p></section>`;
+    <p class="subtle space-top">已有有效凭据会直接复用。首次连接请等“读取组件已准备好”后再登录；已提前登录时，使用“重开微信并连接”，程序会安排好连接顺序。验证通过后，继续连接 DSH 并启动服务。</p></section>`;
 }
 function paintReaderSetup() {
-  const running = state.readerConnecting || state.readerScanning || state.job?.state === 'running';
+  const running = state.readerRecovering || state.readerConnecting || state.readerScanning || state.job?.state === 'running';
   document.querySelectorAll('.reader-setup input,.reader-setup select,.reader-setup button').forEach(input => { input.disabled = !!running; });
-  if ($('#reader-progress')) $('#reader-progress').textContent = state.readerScanning ? '正在查找本机微信账号…' : state.readerConnecting ? state.job?.output?.trim().split('\n').at(-1) || '正在连接微信…' : state.reader?.verified && !readerDirty() ? '数据库已验证并安全保存，可以继续启动服务。' : '';
+  if ($('#reader-progress')) $('#reader-progress').textContent = state.readerRecovering?'正在重开匹配微信，请先停留在登录界面，等待读取组件准备好…':state.readerScanning ? '正在查找本机微信账号…' : state.readerConnecting ? state.job?.output?.trim().split('\n').at(-1) || '正在连接微信…' : state.reader?.verified && !readerDirty() ? '数据库已验证并安全保存，可以继续启动服务。' : '';
   if ($('#reader-save-error')) $('#reader-save-error').textContent = state.readerError || '';
+  if($('#restart-reader-connect'))$('#restart-reader-connect').hidden=!state.readerNeedsRestart;
 }
 function pluginPathField() {
   return `<div class="field full space-top"><label for="plugin-path">DSH 插件目录</label><div class="input-with-button"><input id="plugin-path" value="${escapeHtml(state.deployment?.pluginPath ?? '')}" readonly aria-describedby="plugin-path-help" placeholder="暂时无法获取目录，请刷新后重试"><button class="button" id="copy-plugin-path">复制插件路径</button></div><small id="plugin-path-help">如果在 DSH 中误移除了本项目插件，可在插件页面重新添加此目录，启用后从托盘完整退出并重新打开 DSH。</small></div>`;
@@ -470,15 +520,16 @@ async function saveAll() {
   const invalid = [...document.querySelectorAll('[data-path], [data-context-key]')].find(input => !input.checkValidity());
   if (invalid) { invalid.reportValidity(); return; }
   state.savingAll = true; updateDraftUI();
+  let saved=false;
   try {
     for (const name of [...state.roleDrafts.keys()]) await persistRole(name);
     if (configDirty()) {
-      const result = await api('/api/config', { config: state.draft, revision: state.revision });
-      state.config = result.config; state.draft = structuredClone(result.config); state.revision = result.revision;
+      if(!await saveProjectDraft())return;
+      saved=true;
     }
-    if (readerDirty()) await persistReader();
-    updateDraftUI(); await refreshStatus(); toast(state.status?.pendingApply ? '设置已保存，重启服务后生效。' : '设置已保存并生效。');
-  } catch (error) { showError(error.message); }
+    if (state.readerDraft) {if(!await syncReaderSnapshot())return;if(readerDirty())await persistReader();}
+    clearError();updateDraftUI(); await refreshStatus(); toast(hasDraft()?'提交的设置已保存，保存期间的新输入仍保留在草稿中。':state.status?.pendingApply ? '设置已保存，重启服务后生效。' : '设置已保存并生效。');
+  } catch (error) { showError((saved?'聊天和其他设置已保存；微信连接尚未完成：':'')+error.message); }
   finally { state.savingAll = false; updateDraftUI(); }
 }
 function paintJob() {
@@ -508,6 +559,7 @@ async function pollJob() {
     if (['reader-connect', 'reader-check'].includes(state.job?.action)) {
       state.readerConnecting = false;
       if (state.job.readerConfigured) {
+        state.readerNeedsRestart=false;
         state.reader = await api('/api/reader-config');
         state.readerDraft = { dbPath: state.reader.dbPath, myWxid: state.reader.myWxid, decryptKey: '' };
         state.readerError = '';
@@ -518,7 +570,7 @@ async function pollJob() {
           toast('账号已切换。请完整重开 DSH 后启动服务；新账号需要选择自己的允许的聊天。');
         }
         if (state.deployment) { state.deployment.configured = state.reader.verified; $('#setup-banner').hidden = state.reader.verified; }
-      } else if (state.job.state === 'failed') state.readerError = state.job.message;
+      } else if (state.job.state === 'failed') {state.readerError = state.job.message;state.readerNeedsRestart=['READER_LOGIN_RESTART_REQUIRED','READER_SETUP_TIMEOUT','HOOK_NOT_LISTENING','WECHAT_NOT_RUNNING'].includes(state.job.code);}
       if (state.page==='setup'||state.page==='settings'&&state.settingsSection==='connections') await renderPage();
     }
     await refreshStatus();
@@ -569,7 +621,23 @@ async function saveReader(autoKey = false) {
     await persistReader(autoKey); updateDraftUI(); toast('正在连接并验证所选账号，请查看操作记录。');
   } catch (error) { state.readerError = error.message; paintReaderSetup(); }
 }
+async function restartReaderConnection(){
+  if(configDirty()||state.roleDrafts.size){toast('请先保存其他设置，再重开微信连接。');return;}
+  if(state.readerConnecting||state.readerRecovering||state.job?.state==='running')return;
+  await openProcessRecovery({api,modal,refreshStatus,toast,repairWeChat:true,onRecovered:async()=>{
+    closeModal();state.readerRecovering=true;state.readerError='';paintReaderSetup();
+    try{
+      state.job=await api('/api/jobs',{action:'wechat-open'});state.jobBody={action:'wechat-open'};
+      $('#job-panel').hidden=false;paintJob();await pollJob();
+      if(state.job.state!=='succeeded')throw Error(state.job.message||'匹配微信未能重新打开，请查看操作记录。');
+      state.readerRecovering=false;
+      await saveReader(true);
+    }catch(error){state.readerError=error.message;state.readerNeedsRestart=true;}
+    finally{state.readerRecovering=false;paintReaderSetup();}
+  }});
+}
 async function persistReader(autoKey = true) {
+  if(!await syncReaderSnapshot())throw Error('微信账号选择尚未确认，草稿已保留。');
   if (!state.reader) throw new Error('读取设置尚未载入，请刷新页面。');
   if (state.readerConnecting || state.job?.state === 'running') throw new Error('请等待当前操作完成。');
   state.readerConnecting = true; state.readerError = ''; paintReaderSetup();
@@ -584,7 +652,7 @@ async function load() {
   const info = await fetch('/api/info').then(response => response.json()); state.token = info.token; state.root = info.root;
   const [config, roles, chats, deployment] = await Promise.all([api('/api/config'), api('/api/roles'), api('/api/chats'), api('/api/deployment').catch(() => ({installed:false}))]);
   state.deployment = deployment;
-  state.config = config.config; state.draft = structuredClone(config.config); state.revision = config.revision; state.roles = roles.roles; personaCategoryUI.setData(roles.categories);
+  state.config = config.config; state.draft = structuredClone(config.config); state.revision = config.revision; state.accountScope=config.accountScope;state.roles = roles.roles; personaCategoryUI.setData(roles.categories);
   for (const chat of chats.chats) state.names.set(chat.key, chat.name);
   selectRoute(location.hash);
   if (deployment.installed) {
@@ -665,6 +733,7 @@ document.addEventListener('click', event => {
   if (button.id === 'delete-role') return deletePersona();
   if (button.id === 'set-default-role') { state.draft.persona.default = state.selectedRole; renderPage(); updateDraftUI(); return; }
   if (button.id === 'save-reader') return saveReader();
+  if (button.id === 'restart-reader-connect') return restartReaderConnection();
   if (button.id === 'detect-reader') return discoverReader(true);
   if (button.id === 'scan-reader') return discoverReader(false);
   if (button.id === 'copy-plugin-path') return copyPluginPath(button);
@@ -727,12 +796,16 @@ $('#refresh-button').addEventListener('click', async () => {
   const button=$('#refresh-button'); state.refreshing=true;button.disabled=true;button.classList.add('is-refreshing');button.setAttribute('aria-label','正在刷新');
   try {
     if (!state.config) { await load(); return; }
-    if (hasDraft()) { await refreshStatus(); toast('状态已刷新，未保存的草稿已保留。'); return; }
+    const revision=state.revision;
     const [config,roles]=await Promise.all([api('/api/config'),api('/api/roles')]);
-    // A user can begin editing while the refresh request is in flight.
-    if (hasDraft()) {await refreshStatus();toast('状态已刷新，新输入的草稿已保留。');return;}
-    state.config=config.config;state.draft=structuredClone(config.config);state.revision=config.revision;state.roles=roles.roles;personaCategoryUI.setData(roles.categories);state.reader=null;state.readerDraft=null;
-    await renderPage();await refreshStatus();
+    if(revision!==state.revision){await refreshStatus();return;}
+    if(!await syncProjectSnapshot(config))return;
+    if(!await syncReaderSnapshot())return;
+    // Keep the old baseline for a persona currently being edited, so its
+    // existing revision check still detects concurrent edits to that card.
+    state.roles=roles.roles.map(role=>state.roleDrafts.has(role.name)?state.roles.find(old=>old.name===role.name)??role:role);
+    personaCategoryUI.setData(roles.categories);
+    clearError();await renderPage();await refreshStatus();updateDraftUI();toast(hasDraft()?'已同步最新设置，你的未保存改动已保留。':'已载入最新设置。');
   } catch(error) {showError(error.message);}
   finally {state.refreshing=false;button.disabled=false;button.classList.remove('is-refreshing');button.setAttribute('aria-label','刷新当前页面');}
 });

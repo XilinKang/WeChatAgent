@@ -79,6 +79,17 @@ test('a correct live account commits the selected credentials and preserves the 
  const f=await consoleFixture(t),job=await f.wait((await f.connect()).id);assert.equal(job.state,'succeeded');assert.equal(job.readerConfigured,true);assert.equal(job.accountSwitched,true);assert.equal(job.dshRestartRequired,true);assert.equal(job.phase,'complete');assert.equal(f.stops,1);assert.equal(JSON.parse(fs.readFileSync(path.join(f.root,'state/weflow/WeFlow-config.json'))).myWxid,'wxid_b');assert(!JSON.stringify(job).includes('userdpapi:'));
 });
 
+test('an already logged-in account asks for a cold reconnect only when no valid credential can be reused',async t=>{
+ const f=await consoleFixture(t,{setup:request=>{
+   assert.equal(request.requireLoginRestart,true);
+   return {ok:false,code:'READER_LOGIN_RESTART_REQUIRED'};
+ }}),before=fs.readFileSync(path.join(f.root,'state/weflow/WeFlow-config.json'));
+ const job=await f.wait((await f.connect()).id);
+ assert.equal(job.code,'READER_LOGIN_RESTART_REQUIRED');assert.equal(job.state,'failed');
+ assert(job.message.includes('重开微信并连接'));assert.equal(f.stops,0);
+ assert.deepEqual(fs.readFileSync(path.join(f.root,'state/weflow/WeFlow-config.json')),before);
+});
+
 test('A to B to A uses each live account and restores only that account settings and credential cache',async t=>{
  let account='wxid_b';const f=await consoleFixture(t,{live:()=>({...health,databaseAccounts:[account]})});f.config.wechat.whitelist.private=['123'];f.write('config/wechatagent.json',f.config);
  assert.equal((await f.wait((await f.connect()).id)).state,'succeeded');assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root,'config/wechatagent.json'))).wechat.whitelist.private,[]);

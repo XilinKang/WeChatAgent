@@ -325,7 +325,15 @@ export function apply(ctx, config={}) {
       const create=()=>ctx.agents.create({sessionId:sid,meta:{cwd:path.resolve(chatCwd ?? profiles[key]?.workspacePath ?? config.cwd ?? process.cwd()),agentPreset:preset},agentOptions:{provider,model},setup});
       let handle,recovery;
       try{
-        handle=previousSid && !rotating
+        // DSH retains its sessions independently of this project's mapping.
+        // Recover the exact account-scoped ID after a lost/migrated mapping.
+        let existing=!!previousSid;
+        if(!existing&&!rotating){
+          existing=!!ctx.sessions.get(sid);
+          const persistence=ctx.get?.('sessionPersistence');
+          if(!existing&&persistence?.list)existing=(await persistence.list()).some(record=>record.header?.id===sid);
+        }
+        handle=existing && !rotating
           ? await ctx.agents.resume({resumeSessionId:sid,agentOptions:{provider,model},setup})
           : await create();
       }catch(error){

@@ -218,7 +218,7 @@ def capture_key(executable, account, timeout=180, clock=time.monotonic, sleep=ti
             raise SetupError('READER_KEY_COMPONENT_MISSING') from None
     deadline = clock() + timeout
     attached = None; observed_process = False; seen = set(); buffer = ctypes.create_string_buffer(128)
-    progress('正在连接匹配微信。请在微信中完成登录；已登录时可退出账号后重新登录，程序会等待。')
+    progress('正在准备读取组件，请先停留在匹配微信的登录界面…')
     try:
         while clock() < deadline:
             processes = pids(executable)
@@ -237,6 +237,7 @@ def capture_key(executable, account, timeout=180, clock=time.monotonic, sleep=ti
                     raise SetupError('READER_KEY_ACCESS_DENIED' if b'ACCESS_DENIED' in error or b'0xC0000022' in error else 'READER_SETUP_FAILED')
                 attached = pid
                 observed_process = True
+                progress('读取组件已准备好。现在请在匹配微信中完成登录，程序会自动验证并保存。')
             if library.PollKeyData(buffer, len(buffer)):
                 key = buffer.value.decode('ascii', errors='ignore')
                 if re.fullmatch(r'[0-9a-fA-F]{64}', key) and key not in seen:
@@ -279,6 +280,8 @@ def connect(request):
     if not key:
         if not request.get('autoKey'):
             raise SetupError('READER_KEY_REQUIRED')
+        if request.get('requireLoginRestart'):
+            raise SetupError('READER_LOGIN_RESTART_REQUIRED')
         key = capture_key(request['wechatExecutable'], account['dbPath'])
     progress('数据库验证通过，正在安全保存读取凭据…')
     return {'type': 'result', 'ok': True, **account, 'protectedKey': credential(key, protect=True)}

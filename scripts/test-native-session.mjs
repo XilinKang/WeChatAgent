@@ -459,6 +459,20 @@ test('empty sessions admit extension slots after the native system head and keep
   assert.equal(effective().filter(e=>e.data.source?.socialInstructionSlot==='extensions').length,1);
 });
 
+test('a lost project mapping resumes the exact retained DSH session without recreating it',async t=>{
+  const f=await fixture(t),first=await f.start();
+  const configured=await first.request('/configure',info),original=f.store.get(configured.sessionId);
+  await first.stop();
+  fs.unlinkSync(f.statePath);
+  const restored=await f.start({failCreate:true});
+  const result=await restored.request('/configure',info);
+  assert.equal(result.sessionId,configured.sessionId);
+  assert.equal(restored.calls.create.length,0);
+  assert.equal(restored.calls.resume.length,1);
+  assert.equal(f.store.get(result.sessionId),original);
+  assert.equal((await restored.request('/sessions')).sessions.length,1);
+});
+
 test('the exact missing-head restore failure preserves the old mapping before creating a replacement',async t=>{
   const f=await fixture(t),first=await f.start();
   const old=await first.request('/followup',{...info,message:'保留的旧会话'});await first.stop();

@@ -108,7 +108,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
   const memoryView=createMemoryConsole({root,configFor:()=>snapshot().config,plugin});
   const snapshot = () => {
     const raw = fs.readFileSync(fs.existsSync(configFile) ? configFile : path.join(root, 'config', 'wechatagent.example.json'), 'utf8');
-    return { config: JSON.parse(raw.replace(/^\uFEFF/, '')), revision: hash(raw) };
+    return { config: JSON.parse(raw.replace(/^\uFEFF/, '')), revision: hash(raw),accountScope:activeReaderAccount(root).id };
   };
   const safeText = input => {
     let text = String(input ?? '');
@@ -287,7 +287,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     Promise.resolve().then(async () => {
       if (!connectRequest) return execute(spec, output);
       job.phase='checking-wechat';
-      await accountVerifier({root,config:snapshot().config,settings:connectRequest,fetchImpl,wait:false,requireReady:false});
+      const liveAccount=await accountVerifier({root,config:snapshot().config,settings:connectRequest,fetchImpl,wait:false,requireReady:false});
+      connectRequest.requireLoginRestart=liveAccount?.ready===true;
       job.phase='validating-database';
       const result = await readerSetup({ root, python: snapshot().config.runtime.python, request: connectRequest, onProgress: message => output(message + '\n') });
       if (!result.ok) { job.message = readerSetupMessage(result.code);if(setupCode(result.code)){job.code=setupCode(result.code);output('['+job.code+'] ');}output(job.message + '\n'); return 1; }
@@ -389,6 +390,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         assets['/memory-view.js']=['memory-view.js','text/javascript; charset=utf-8'];assets['/memory-view.css']=['memory-view.css','text/css; charset=utf-8'];
         assets['/fish-notebook.js']=['fish-notebook.js','text/javascript; charset=utf-8'];assets['/fish-notebook.css']=['fish-notebook.css','text/css; charset=utf-8'];
         assets['/conversation-settings.mjs']=['conversation-settings.mjs','text/javascript; charset=utf-8'];
+        assets['/config-sync.mjs']=['config-sync.mjs','text/javascript; charset=utf-8'];
         assets['/dsh-catalog.mjs']=['dsh-catalog.mjs','text/javascript; charset=utf-8'];
         assets['/persona-delete.js']=['persona-delete.js','text/javascript; charset=utf-8'];
         assets['/persona-categories.js']=['persona-categories.js','text/javascript; charset=utf-8'];assets['/persona-categories.css']=['persona-categories.css','text/css; charset=utf-8'];
